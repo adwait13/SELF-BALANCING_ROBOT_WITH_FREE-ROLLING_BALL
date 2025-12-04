@@ -104,5 +104,3 @@ FSO.slx
 
 ROO.slx
     Simulink model for the Reduced Order Observer with LQR feedback.
-
-================================================================================

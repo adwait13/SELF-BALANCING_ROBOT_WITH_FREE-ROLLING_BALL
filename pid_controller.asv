@@ -1,0 +1,146 @@
+clc; clear; close all;
+
+%% ============================
+%  Load Full Model Parameters
+% =============================
+fprintf("Loading model_data.mat ...\n");
+load("model_data.mat");   % loads params
+
+%% Generating TF
+
+sys = ss(A,B,C,D);
+[num, den] = ss2tf(A,B,C,D);
+G_theta = tf(num(1,:), den)
+G_x = tf(num(2,:), den)
+
+%% Defining variables
+
+M_w = params.M_wheel;
+M_r = params.M_body;
+m_b = params.m_ball;
+R   = params.R;
+h   = params.h;
+r   = params.r;
+g   = params.g;
+d   = params.d;
+
+% Moments of inertia
+I_w = 0.5 * M_w * R^2;
+I_r_com = (1/12) * M_r * (h^2 + d^2);
+I_r = I_r_com + M_r * d^2;
+I_b = 0.4 * m_b * r^2;
+
+% Ball COM height
+l = h + r;
+
+%%
+% Safety limits
+x_limit = d/2;                 % ball can move only within +/- d/2 
+theta_limit = deg2rad(15);     % 15 degrees in radians
+
+% Moments of Inertia
+I_w = params.I_wheel;             % Inertia of one wheel
+I_r = params.I_body;              % Inertia of robot body
+I_b = params.I_ball;              % Inertia of the ball
+
+% Derived Parameters
+l = h + r; % Height of ball CoM from wheel center
+
+M1 = [(I_b/(r^2)) + m_b, m_b*l;
+      m_b*l,            I_r + m_b*(l^2)];
+
+% M2 = [[1,  1+(g*m_b)],
+%       [1-(m_b*g), 1 - (M_r*d*g)-(m_b*g*l)]]
+M2 = [0,             (g*m_b);
+      (m_b*g), (M_r*d*g) + (m_b*g*l)];
+
+% M3 = [[m_b*l],
+%       [-m_b]]
+M3 = -[m_b*l;
+      I_r+ m_b*l^2];
+
+% Calculate A and B
+% This is the numerically preferred method for A = inv(M1) * M2
+A4 = M1 \ M2;
+B4 = M1 \ M3;
+%%
+A = [0 1 0 0;... 
+    A4(1,1) 0 A4(1,2) 0;...
+    0 0 0 1;...
+    A4(2,1) 0 A4(2,2) 0];
+B = -[0 ; B4(1); 0 ; B4(2)] ;
+C = eye(4);
+D = zeros(4,1);
+
+[num,den] = ss2tf(A,B,C,D);
+
+%% Inner loop
+s = tf('s');
+G_theta = tf(num(3,:), den);
+Kp_t = 1200;                  % Proportional gain
+Ki_t = 1680;                   % Integral gain
+Kd_t = 20;                    % Derivative gain20
+C_theta = pid(Kp_t, Ki_t, Kd_t);
+T_theta = feedback(C_theta*G_theta, 1);
+pole(T_theta)
+
+%%
+sys = ss(A,B,C,D);     % 1 input (u), 4 outputs: [xb; x_bd; theta; thetad]
+C_theta = pid(Kp_t, Ki_t, Kd_t);   % tuned so theta response is fast & well damped
+% inner_cl: input = theta_ref, outputs = [xb; x_bd; theta; thetad]
+inner_cl = feedback(sys, C_theta, 1, 3);
+%%
+poles_inner = pole(inner_cl);
+fprintf('Inner loop poles:\n');
+disp(poles_inner);
+
+% Check that all poles are in LHP (real part < 0)
+if all(real(poles_inner) < 0)
+    fprintf('Inner loop is STABLE ✓\n');
+else
+    fprintf('Inner loop is UNSTABLE ✗\n');
+end
+
+%%
+figure;
+impulse(inner_cl(3,1), 2);  % theta (output 3) due to theta_ref (input 1) 
+title('Inner Loop: theta Response to impulse');
+grid on;
+
+%%
+% Get transfer function from theta ref to x
+Gxb_outer = tf(inner_cl(1,1));  % x (output 1) / theta_ref (input 1)
+Gxb_outer = minreal(Gxb_outer);  % clean up
+
+% Check its poles
+poles_outer = pole(Gxb_outer);
+fprintf('Outer plant poles:\n');
+disp(poles_outer);
+
+% Quick sanity check
+figure; impulse(Gxb_outer, 2);
+title('Outer Plant: x_b Response to theta ref');
+grid on;
+%%
+Kp_xb = 7;
+Ki_xb = 0.01;
+Kd_xb = 5;
+
+C_xb = pid(Kp_xb, Ki_xb, Kd_xb);
+T_xb = feedback(-C_xb*Gxb_outer, 1);
+
+pole(T_xb)
+%%
+% Combine both loops
+C_xb = -pid(Kp_xb, Ki_xb, Kd_xb);       % tuned outer controller
+G_total = series(C_xb, inner_cl);       % x_ref → theta_ref → [x;...]
+T_total = feedback(G_total(1,1), 1);    % close outer feedback
+
+% Simulate step response
+impulse(T_total, 100);
+title('xb Response to impulse');
+grid on; hold on;
+plot([0 100], [x_limit x_limit], 'g--', 'LineWidth', 1.5);
+plot([0 100], [-x_limit -x_limit], 'g--', 'LineWidth', 1.5);
+legend('Response', '+Safety Limit', '-Safety Limit');
+xlabel('Time (s)'); ylabel('Ball Position x (m)');
